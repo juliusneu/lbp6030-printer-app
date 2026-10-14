@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""ippeveprinter print command: renders one document and sends it to the printer.
+
+Gets the document as argv[1], the job's IPP attributes as IPP_* variables, CONTENT_TYPE, and DEVICE_URI
+(socket://HOST[:PORT]). Reports on stderr: INFO:/ERROR: (job message), STATE: +/-reason, ATTR: (toner level).
+LBP6030_DRY_RUN_DIR=/dir writes the job and a copy of the input there instead of printing."""
+import os
+import re
+import shutil
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from lbp6030 import device, jobwriter, media, printjob  # noqa: E402
+
+
+def msg(kind, text):
+    print(f"{kind}: {text}", file=sys.stderr, flush=True)
+
+
+def paper_from_media_col(col):
+    """IPP media-col value as ippeveprinter writes it, e.g. {media-size={x-dimension=21000 y-dimension=29700} ...}"""
+    m = re.search(r"x-dimension=(\d+)\D+y-dimension=(\d+)", col or "")
+    if not m:
+        return None
+    x, y = int(m.group(1)), int(m.group(2))            # hundredths of a millimetre
+    for key, (_, _, w, h, _, _) in jobwriter.PAPER.items():
+        wmm, hmm = w / 600 * 2540, h / 600 * 2540
+        if abs(wmm - x) < 150 and abs(hmm - y) < 150 or abs(wmm - y) < 150 and abs(hmm - x) < 150:
+            return key
+    return None
+
+
+def main():
+    doc = sys.argv[1]
+    env = os.environ
+    m = re.match(r"socket://([^:/]+)(?::(\d+))?", env.get("DEVICE_URI", ""))
+    if not m:
+        msg("ERROR", "DEVICE_URI must be socket://PRINTER[:PORT] (see run.sh)")
+        return 1
+    host, port = m.group(1), int(m.group(2) or 9100)
+
+    col = env.get("IPP_MEDIA_COL", "")
+    paper = paper_from_media_col(col) or media.paper_from_ipp(env.get("IPP_MEDIA") or env.get("IPP_MEDIA_DEFAULT"))
+    mt = re.search(r"media-type=([\w-]+)", col)
+    mtype = media.media_type_from_ipp(mt.group(1) if mt else env.get("IPP_MEDIA_TYPE"))
+    copies = max(1, int(env.get("IPP_COPIES", "1") or 1))
+    collate = env.get("IPP_MULTIPLE_DOCUMENT_HANDLING", "") != "separate-documents-uncollated-copies"
+    toner_save = env.get("IPP_PRINT_QUALITY", "") == "draft"
+    fit = env.get("IPP_PRINT_SCALING", "auto") != "none"
+    ctype = env.get("CONTENT_TYPE", "application/pdf")
+    name = env.get("IPP_JOB_NAME") or os.path.basename(doc)
+    user = env.get("IPP_JOB_ORIGINATING_USER_NAME") or env.get("IPP_REQUESTING_USER_NAME") or "user"
+
+    msg("INFO", f"Preparing {ctype} on {paper} ({mtype}), copies {copies}{'' if collate else ' uncollated'}")
+    try:
+        job, npages = printjob.make_job(doc, ctype, paper, mtype, copies, collate, toner_save,
+                                        job_name=name, user=user, fit=fit)
+    except Exception as e:  # noqa: BLE001
+        msg("ERROR", f"Could not render the document: {e}")
+        return 1
+    problems, info = device.validate(job, int(env.get("LBP6030_MAX_SHEETS", "100")))
+    if problems:
+        msg("ERROR", "Job failed validation: " + "; ".join(problems))
+        return 1
+    print(f"ATTR: job-impressions={info['sheets']}", file=sys.stderr, flush=True)
+
+    dry = env.get("LBP6030_DRY_RUN_DIR")
+    if dry:
+        os.makedirs(dry, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        open(os.path.join(dry, f"{stamp}.job"), "wb").write(job)
+        shutil.copy(doc, os.path.join(dry, f"{stamp}.input"))
+        open(os.path.join(dry, f"{stamp}.env"), "w").write(
+            "\n".join(f"{k}={v}" for k, v in sorted(env.items()) if k.startswith(("IPP_", "CONTENT_TYPE"))))
+        msg("INFO", f"Dry run: job written to {dry} ({info['sheets']} sheet(s)), nothing printed")
+        return 0
+
+    reported = set()
+
+    def report(st):
+        now = set(st["reasons"])
+        for r in sorted(now - reported):
+            print(f"STATE: +{r}", file=sys.stderr, flush=True)
+        for r in sorted(reported - now):
+            print(f"STATE: -{r}", file=sys.stderr, flush=True)
+        reported.clear()
+        reported.update(now)
+        if st.get("toner_level") is not None:
+            print(f'ATTR: marker-levels={st["toner_level"]} marker-low-levels=5 marker-high-levels=100 '
+                  f'marker-types=toner marker-colors=#000000 marker-names="{st["toner_name"] or "Black Toner"}"',
+                  file=sys.stderr, flush=True)
+        if "media-empty-error" in now:
+            msg("INFO", "Out of paper: load paper and press the printer's Paper key")
+
+    st = device.status(host)
+    for _ in range(15):                      # give a printer waking from sleep a moment
+        if st["reachable"]:
+            break
+        report(st)
+        time.sleep(2)
+        st = device.status(host)
+    if not st["reachable"]:
+        msg("ERROR", f"Printer {host} is not reachable (switched off?)")
+        return 1
+    report(st)
+    try:
+        device.send(job, host, port)
+    except OSError as e:
+        msg("ERROR", f"Could not send the job to {host}:{port}: {e}")
+        return 1
+    msg("INFO", f"Printing {info['sheets']} sheet(s) ...")
+    ok = device.wait_printed(host, st["pages"], info["sheets"], report,
+                             timeout=float(env.get("LBP6030_WAIT_SECONDS", "1800")))
+    report(device.status(host))
+    if not ok:
+        msg("ERROR", "Timed out waiting for the printer to finish")
+        return 1
+    print(f"ATTR: job-impressions-completed={info['sheets']}", file=sys.stderr, flush=True)
+    msg("INFO", "Printed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
