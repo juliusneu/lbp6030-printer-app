@@ -23,6 +23,9 @@ printer, or as a starting point for your own.
 - macOS with Xcode Command Line Tools (`swiftc`; the PDF renderer in `quartz/` is compiled on first use).
 - Python 3 with numpy and Pillow: `python3 -m pip install -r requirements.txt`
 - The printer at a fixed IP address (DHCP reservation).
+- For iPhones and iPads: a current CUPS from Homebrew, `brew install cups`. macOS's own `ippeveprinter`
+  (CUPS 2.3.4) rejects print jobs from iOS. Homebrew installs CUPS separately and leaves macOS's printing system
+  alone; the printer app uses it automatically.
 
 ## Usage
 
@@ -33,13 +36,26 @@ python3 -m lbp6030 print document.pdf --printer 192.168.1.50
 Options: `--media a5|letter|env10|<PWG media name>`, `--media-type stationery-heavyweight|labels|...`,
 `--copies N [--no-collate]`, `--toner-save`, `--no-fit`, `--dry-run out.job`.
 
-Printer app for Macs and iPhones on the same network (the Mac has to stay awake):
+### Printer app (AirPrint / IPP Everywhere)
+
+Run it in a terminal, or install it as a background job that starts at login:
 
 ```bash
-printer-app/run.sh 192.168.1.50 "LBP6030w"
+printer-app/lbp6030-printer-app 192.168.1.50 "LBP6030w"     # in a terminal, stop with Ctrl-C
+printer-app/install.sh 192.168.1.50 "LBP6030w"              # background job (LaunchAgent)
+printer-app/install.sh --uninstall
 ```
-Then add the printer in System Settings > Printers & Scanners; iPhones see it in the Print dialog.
+Then add the printer in System Settings > Printers & Scanners; iPhones see it in the Print dialog. The background
+job runs inside a small launcher, "LBP6030 Printer App", which `install.sh` builds into `build/`. It logs to
+`~/Library/Logs/lbp6030-printer-app.log` and shows up under System Settings > General > Login Items & Extensions.
 With `LBP6030_DRY_RUN_DIR=/some/dir` jobs are written there instead of printed.
+
+macOS settings:
+- **Local Network permission:** macOS asks once whether the printer app may find devices on your local network;
+  allow it. If jobs fail with "No route to host", turn it on under System Settings > Privacy & Security > Local
+  Network ("LBP6030 Printer App" for the background job, your terminal app when run in a terminal).
+- **Keep the Mac awake:** System Settings > Energy, "Prevent automatic sleeping when the display is off" and "Wake
+  for network access".
 
 ## How it works
 
@@ -59,6 +75,8 @@ in [docs/compression-notes.md](docs/compression-notes.md).
 - Only the LBP6030w is tested.
 - A5, B5, postcard and envelope sizes and heavyweight paper use a second raster mode that is verified offline only.
 - No custom paper sizes. Status updates only while a job runs.
+- If iPhones don't see the printer, check that devices on your Wi-Fi can reach each other (some routers isolate
+  them, or don't forward between devices on the same band).
 
 ## Tests
 

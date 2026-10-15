@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """ippeveprinter print command: renders one document and sends it to the printer.
 
-Gets the document as argv[1], the job's IPP attributes as IPP_* variables, CONTENT_TYPE, and DEVICE_URI
-(socket://HOST[:PORT]). Reports on stderr: INFO:/ERROR: (job message), STATE: +/-reason, ATTR: (toner level).
+Gets the document as argv[1], the job's IPP attributes as IPP_* variables, CONTENT_TYPE, and the printer as
+LBP6030_DEVICE_URI or DEVICE_URI (socket://HOST[:PORT]). Reports on stderr: INFO:/ERROR: (job message), STATE: +/-reason, ATTR: (toner level).
 LBP6030_DRY_RUN_DIR=/dir writes the job and a copy of the input there instead of printing."""
 import os
 import re
@@ -34,9 +34,9 @@ def paper_from_media_col(col):
 def main():
     doc = sys.argv[1]
     env = os.environ
-    m = re.match(r"socket://([^:/]+)(?::(\d+))?", env.get("DEVICE_URI", ""))
+    m = re.match(r"socket://([^:/]+)(?::(\d+))?", env.get("LBP6030_DEVICE_URI") or env.get("DEVICE_URI", ""))
     if not m:
-        msg("ERROR", "DEVICE_URI must be socket://PRINTER[:PORT] (see run.sh)")
+        msg("ERROR", "LBP6030_DEVICE_URI must be socket://PRINTER[:PORT] (see lbp6030-printer-app)")
         return 1
     host, port = m.group(1), int(m.group(2) or 9100)
 

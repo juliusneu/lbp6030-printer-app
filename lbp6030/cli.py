@@ -2,7 +2,7 @@
 
   print FILE      render a PDF / JPEG / PNG / PWG Raster / URF file and print it (or --dry-run to a job file)
   status          read-only printer status over SNMP
-  validate JOB    check a job file (structure + full decode of every band)
+  validate JOB    check that a job file is complete and decodes cleanly
 The printer address comes from --printer or the LBP6030_HOST environment variable.
 """
 import argparse
