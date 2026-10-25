@@ -152,31 +152,54 @@ class Server(unittest.TestCase):
         conn.request("POST", "/ipp/print", body + data, {"Content-Type": "application/ipp"})
         return ipp.Request(conn.getresponse().read())
 
+    def test_create_job_two_step_send(self):
+        """CUPS clients send the document with last-document=false, then an empty Send-Document"""
+        with tempfile.TemporaryDirectory() as td:
+            httpd, port = self.start(td)
+            try:
+                job_id = self.call(port, 0x0005, []).get("job-id")
+                one = self.call(port, 0x0006, [(ipp.INTEGER, "job-id", [job_id]), (ipp.BOOLEAN, "last-document", [False]),
+                                               (ipp.MIME, "document-format", ["image/urf"])], self.urf())
+                two = self.call(port, 0x0006, [(ipp.INTEGER, "job-id", [job_id]), (ipp.BOOLEAN, "last-document", [True])])
+                self.assertEqual((one.operation, two.operation), (ipp.OK, ipp.OK))
+                self.assertEqual(self.wait(port, job_id), server.COMPLETED)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+    def start(self, dry_run):
+        printer = server.Printer("127.0.0.1", "test", 0, dry_run=dry_run)
+        httpd = server.make_server(0)
+        httpd.printer = printer
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        return httpd, httpd.server_address[1]
+
+    @staticmethod
+    def urf():
+        g, body = Raster().sample()
+        hdr = bytearray(32)
+        hdr[0] = 8
+        struct.pack_into(">III", hdr, 12, g.shape[1], g.shape[0], 600)
+        return b"UNIRAST\x00" + struct.pack(">I", 1) + bytes(hdr) + bytes(body)
+
+    def wait(self, port, job_id):
+        for _ in range(100):
+            state = self.call(port, 0x0009, [(ipp.INTEGER, "job-id", [job_id])]).get("job-state")
+            if state in (server.COMPLETED, server.ABORTED):
+                return state
+            time.sleep(0.2)
+        return state
+
     def test_print_job_dry_run(self):
         with tempfile.TemporaryDirectory() as td:
-            printer = server.Printer("127.0.0.1", "test", 0, dry_run=td)
-            httpd = server.make_server(0)
-            httpd.printer = printer
-            port = httpd.server_address[1]
-            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            httpd, port = self.start(td)
             try:
                 attrs = self.call(port, 0x000B, [])
                 self.assertEqual(attrs.operation, ipp.OK)
                 self.assertIn("image/urf", attrs.values("document-format-supported"))
-                g, body = Raster().sample()
-                hdr = bytearray(32)
-                hdr[0] = 8
-                struct.pack_into(">III", hdr, 12, g.shape[1], g.shape[0], 600)
-                urf = b"UNIRAST\x00" + struct.pack(">I", 1) + bytes(hdr) + bytes(body)
-                job = self.call(port, 0x0002, [(ipp.MIME, "document-format", ["image/urf"])], urf)
+                job = self.call(port, 0x0002, [(ipp.MIME, "document-format", ["image/urf"])], self.urf())
                 self.assertEqual(job.operation, ipp.OK)
-                job_id = job.get("job-id")
-                for _ in range(100):
-                    state = self.call(port, 0x0009, [(ipp.INTEGER, "job-id", [job_id])]).get("job-state")
-                    if state in (server.COMPLETED, server.ABORTED):
-                        break
-                    time.sleep(0.2)
-                self.assertEqual(state, server.COMPLETED)
+                self.assertEqual(self.wait(port, job.get("job-id")), server.COMPLETED)
                 jobs = [f for f in os.listdir(td) if f.endswith(".job")]
                 self.assertEqual(len(jobs), 1)
                 problems, _ = device.validate(open(os.path.join(td, jobs[0]), "rb").read())

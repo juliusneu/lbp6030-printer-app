@@ -17,7 +17,7 @@ printer, or as a starting point for your own.
   readable and thin gray lines visible.
 - 20 paper sizes, media types (plain, lightweight, heavyweight, cardstock, labels, transparency), collated and
   uncollated copies, toner save, shrink-to-fit, landscape rotation.
-- Printer status (paper out, jam, door open, toner level) is passed back while a job runs.
+- Printer status (paper out, jam, door open, toner level) is passed back to the Mac and iPhone.
 
 ## Requirements
 
@@ -77,7 +77,7 @@ in [docs/compression-notes.md](docs/compression-notes.md).
 
 - Only the LBP6030w is tested.
 - A5, B5, postcard and envelope sizes and heavyweight paper use a second raster mode that is verified offline only.
-- No custom paper sizes. Status updates only while a job runs.
+- No custom paper sizes.
 - If iPhones don't see the printer, check that devices on your Wi-Fi can reach each other (some routers isolate
   them, or don't forward between devices on the same band).
 

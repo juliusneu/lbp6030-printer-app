@@ -122,8 +122,14 @@ class Printer:
                 or not ({"printer-uri", "job-uri"} & set(names))):
             return reply(ipp.BAD_REQUEST, message="Missing required attributes.")
         op = OPERATIONS.get(req.operation)
-        uri_host = host or f"localhost:{self.port}"
         log(f"{op or hex(req.operation)} from {req.get('requesting-user-name', '?')}")
+        try:
+            return self._operation(req, op, host or f"localhost:{self.port}", reply)
+        except Exception as e:  # noqa: BLE001
+            log(f"{op}: {e!r}")
+            return reply(ipp.INTERNAL_ERROR, message=f"Internal error: {e}")
+
+    def _operation(self, req, op, uri_host, reply):
         if op == "Get-Printer-Attributes":
             wanted = set(req.values("requested-attributes")) or {"all"}
             attrs = [a for a in self.printer_attributes(uri_host)
@@ -141,13 +147,20 @@ class Printer:
                 self._add_document(job, req, last=True)
             return reply(ipp.OK, [(ipp.JOB, self.job_attributes(job, uri_host, brief=True))])
         if op in ("Send-Document", "Cancel-Job", "Get-Job-Attributes", "Close-Job"):
-            job = self.jobs.get(req.get("job-id"))
+            job_id = req.get("job-id")
+            if job_id is None and req.get("job-uri"):
+                job_id = int(re.sub(r".*/", "", req.get("job-uri")) or 0)
+            job = self.jobs.get(job_id)
             if job is None:
                 return reply(ipp.NOT_FOUND, message="Job not found.")
             if op == "Send-Document":
-                if job.state != PENDING or job.document is not None:
-                    return reply(ipp.NOT_POSSIBLE, message="Job is not accepting documents.")
-                self._add_document(job, req, last=bool(req.get("last-document", True)))
+                last = bool(req.get("last-document", True))
+                if job.state != PENDING or (job.document is not None and req.data):
+                    return reply(ipp.NOT_POSSIBLE, message="Job is not accepting documents (one document per job).")
+                if job.document is None:
+                    self._add_document(job, req, last)
+                elif last:                       # an empty Send-Document that only closes the job
+                    self._queue(job)
                 return reply(ipp.OK, [(ipp.JOB, self.job_attributes(job, uri_host, brief=True))])
             if op == "Cancel-Job":
                 if job.state != PENDING:
@@ -193,8 +206,11 @@ class Printer:
             f.write(data)
         job.document = path
         if last:
-            job.reasons = ["job-queued"]
-            self.queue.put(job)
+            self._queue(job)
+
+    def _queue(self, job):
+        job.reasons = ["job-queued"]
+        self.queue.put(job)
 
     def printer_attributes(self, uri_host):
         st = self.status
@@ -343,6 +359,7 @@ class Printer:
         while True:
             job = self.queue.get()
             if job.state != PENDING:
+                self._remove_document(job)
                 continue
             self.current = job
             job.state, job.reasons, job.processing = PROCESSING, ["job-printing"], time.time()
@@ -356,8 +373,12 @@ class Printer:
             job.completed = time.time()
             log(f"job {job.id} '{job.name}': {JOB_STATES[job.state]} {job.message}")
             self.current = None
-            if job.document and os.path.exists(job.document) and not self.dry_run:
-                os.remove(job.document)
+            self._remove_document(job)
+
+    @staticmethod
+    def _remove_document(job):
+        if job.document and os.path.exists(job.document):
+            os.remove(job.document)
 
     def _print(self, job):
         col = job.value("media-col") or {}
@@ -366,7 +387,8 @@ class Printer:
         if size:
             paper = paper_for_size(size.get("x-dimension", (0, [0]))[1][0], size.get("y-dimension", (0, [0]))[1][0])
         paper = paper or media.paper_from_ipp(job.value("media"))
-        mtype = media.media_type_from_ipp(col.get("media-type", (0, [None]))[1][0] if col else job.value("media-type"))
+        mtype = media.media_type_from_ipp((col.get("media-type", (0, [None]))[1][0] if col else None)
+                                          or job.value("media-type"))
         copies = max(1, int(job.value("copies", 1)))
         collate = job.value("multiple-document-handling", "") != "separate-documents-uncollated-copies"
         toner_save = job.value("print-quality") == 3
