@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- LBP6030w-style compact laser printer, front view from slightly above.
+       Own vector drawing (no photos, logos or lettering). Plain shapes and gradients only. -->
+  <defs>
+    <radialGradient id="shadow">
+      <stop offset="0" stop-color="#000" stop-opacity="0.32"/>
+      <stop offset="0.6" stop-color="#000" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0.35" stop-color="#eef0f2"/>
+      <stop offset="1" stop-color="#dcdfe3"/>
+    </linearGradient>
+    <linearGradient id="sides" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#bfc4ca"/>
+      <stop offset="0.04" stop-color="#d6d9dd"/>
+      <stop offset="0.13" stop-color="#eceef0" stop-opacity="0"/>
+      <stop offset="0.88" stop-color="#eceef0" stop-opacity="0"/>
+      <stop offset="0.96" stop-color="#d4d7db"/>
+      <stop offset="1" stop-color="#bcc1c7"/>
+    </linearGradient>
+    <linearGradient id="base" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0.14"/>
+    </linearGradient>
+    <linearGradient id="under" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#000" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="top" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e3e6e9"/>
+      <stop offset="0.5" stop-color="#f6f7f8"/>
+      <stop offset="0.78" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e6e8eb"/>
+    </linearGradient>
+    <linearGradient id="grip" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#b3b8be"/>
+      <stop offset="1" stop-color="#e9ebee"/>
+    </linearGradient>
+    <linearGradient id="tray" x1="0" y1="0" x2="0.25" y2="1">
+      <stop offset="0" stop-color="#8e9298"/>
+      <stop offset="0.45" stop-color="#62666c"/>
+      <stop offset="0.85" stop-color="#3a3d42"/>
+      <stop offset="1" stop-color="#2a2c30"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0.02"/>
+    </linearGradient>
+  </defs>
+
+  <!-- soft shadow -->
+  <ellipse cx="256" cy="414" rx="246" ry="26" fill="url(#shadow)"/>
+
+  <!-- body: silhouette, rounded vertical edges, base curving under -->
+  <path d="M58 104 H454 C474 104 485 128 487 166 L488 374 C488 398 474 412 450 412 H62 C38 412 24 398 24 374 L25 166 C27 128 38 104 58 104 Z"
+        fill="url(#front)" stroke="#b3b8be" stroke-width="3"/>
+  <path d="M58 104 H454 C474 104 485 128 487 166 L488 374 C488 398 474 412 450 412 H62 C38 412 24 398 24 374 L25 166 C27 128 38 104 58 104 Z"
+        fill="url(#sides)"/>
+  <path d="M25.5 366 H486.5 V374 C486.5 397 473 410.5 450 410.5 H62 C39 410.5 25.5 397 25.5 374 Z" fill="url(#base)"/>
+
+  <!-- soft shade under the overhanging top cover -->
+  <path d="M26 192 C28 214 44 226 84 227 H432 C470 226 484 214 486 192 V214 C484 232 470 242 432 242 H84 C44 242 28 232 26 214 Z" fill="url(#under)"/>
+
+  <!-- top cover: top surface and rounded front shoulder, with its seam -->
+  <path d="M58 105.5 H454 C473 105.5 483.5 128 485.5 166 L486 192 C484 214 470 226 432 227 H84 C44 226 28 214 26 192 L26.5 166 C28.5 128 39 105.5 58 105.5 Z"
+        fill="url(#top)"/>
+  <path d="M26 192 C28 214 44 226 84 227 H432 C470 226 484 214 486 192" fill="none" stroke="#b4b9bf" stroke-width="3"/>
+
+  <!-- front panel: only fine seams left and right -->
+  <path d="M89 229 V406 M432 229 V406" stroke="#a9aeb5" stroke-width="3.5"/>
+  <path d="M92.5 229 V405 M435.5 229 V405" stroke="#f8f9fa" stroke-width="2"/>
+
+  <!-- grip recess at the right edge of the panel -->
+  <path d="M434 252 C451 256 453 290 434 295 Z" fill="url(#grip)"/>
+  <path d="M434 295 C453 290 451 256 434 252" fill="none" stroke="#fafbfb" stroke-width="2"/>
+
+  <!-- power button -->
+  <circle cx="61" cy="276" r="10.5" fill="#f6f7f8" stroke="#a6abb2" stroke-width="2.5"/>
+  <path d="M57.5 273.5 A5 5 0 1 0 64.5 273.5 M61 270 V276" fill="none" stroke="#9aa0a7" stroke-width="1.8" stroke-linecap="round"/>
+
+  <!-- output tray cover: recess, smoky glass, gloss, front lip and hinge tabs -->
+  <path d="M86 108.5 H434 C452 108.5 461 121 462 142 L464 181 C464.5 190 460 196 451 196 H77 C68 196 63.5 190 64 181 L68 125 C69 113 73 108.5 86 108.5 Z" fill="#2b2d31"/>
+  <path d="M88 111 H433 C449 111 457.5 122 458.5 142 L460.5 179 C461 184 458 186.5 452 186.5 H76 C70 186.5 67 184 67.5 179 L71 126 C72 115 76 111 88 111 Z" fill="url(#tray)"/>
+  <path d="M88 112 H433 C448 112 456 122 457 140 L457.5 146 C350 140 190 140 70.5 150 L72 126 C73 116 77 112 88 112 Z" fill="url(#gloss)"/>
+  <path d="M69 190 H459" stroke="#a9adb3" stroke-width="4"/>
+  <rect x="100" y="185" width="18" height="8" rx="2" fill="#8f949a"/>
+  <rect x="406" y="185" width="18" height="8" rx="2" fill="#8f949a"/>
+
+  <!-- buttons and LEDs on the top surface, front left -->
+  <circle cx="50" cy="125" r="3" fill="#a3a8ae"/>
+  <circle cx="48" cy="141" r="5.5" fill="#f4f5f6" stroke="#aab0b6" stroke-width="2"/>
+  <circle cx="46" cy="157" r="3" fill="#5fc16e"/>
+  <ellipse cx="44" cy="173" rx="7" ry="5.5" fill="#d8dbdf" stroke="#a5aab1" stroke-width="2"/>
+</svg>

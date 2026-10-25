@@ -1,13 +1,17 @@
 """Self-contained tests (no printer, no vendor software): python3 -m unittest discover tests"""
+import http.client
 import os
 import struct
 import sys
+import tempfile
+import threading
+import time
 import unittest
 
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from lbp6030 import bandcodec, decode, device, jobwriter, media, pipeline, render  # noqa: E402
+from lbp6030 import bandcodec, decode, device, ipp, jobwriter, media, pipeline, render, server  # noqa: E402
 
 
 class Codec(unittest.TestCase):
@@ -122,11 +126,64 @@ class Media(unittest.TestCase):
         self.assertEqual(media.paper_from_ipp("iso_a4_210x297mm,tray-1"), "iso_a4_210x297mm")
         self.assertEqual(media.paper_from_ipp("Env10"), "na_number-10_4.125x9.5in")
         self.assertEqual(media.media_type_from_ipp("envelope"), "stationery")
-        conf = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "printer-app", "lbp6030.conf")).read()
-        for line in conf.splitlines():
-            if line.startswith(("ATTR keyword media-supported", "ATTR keyword media-type-supported")):
-                names = set(line.split()[-1].split(",")) - {"envelope"}
-                self.assertLessEqual(names, set(jobwriter.PAPER) | set(jobwriter.MEDIA_TYPES))
+        self.assertLessEqual(set(server.MEDIA), set(jobwriter.PAPER))
+        self.assertEqual(server.paper_for_size(21000, 29700), "iso_a4_210x297mm")
+
+
+class Ipp(unittest.TestCase):
+    def test_roundtrip(self):
+        size = {"x-dimension": (ipp.INTEGER, [21000]), "y-dimension": (ipp.INTEGER, [29700])}
+        col = {"media-size": (ipp.BEGIN_COLLECTION, [size]), "media-type": (ipp.KEYWORD, ["stationery"])}
+        msg = ipp.response(7, 0x0002, [(ipp.JOB, [(ipp.BEGIN_COLLECTION, "media-col", [col]),
+                                                  (ipp.KEYWORD, "requested-attributes", ["a", "b"])])])
+        req = ipp.Request(msg + b"DATA")
+        self.assertEqual((req.operation, req.request_id, req.data), (2, 7, b"DATA"))
+        self.assertEqual(req.values("requested-attributes"), ["a", "b"])
+        self.assertEqual(req.get("media-col")["media-size"][1][0]["x-dimension"][1], [21000])
+
+
+class Server(unittest.TestCase):
+    def call(self, port, op, attrs, data=b""):
+        ops = [(ipp.CHARSET, "attributes-charset", ["utf-8"]), (ipp.LANGUAGE, "attributes-natural-language", ["en"]),
+               (ipp.URI, "printer-uri", [f"ipp://localhost:{port}/ipp/print"])] + attrs
+        body = ipp.response(1, op, [])[:-1]      # header + charset/language group without the end tag
+        body = bytes(body[:8]) + bytes([ipp.OPERATION]) + b"".join(ipp.encode_attr(*a) for a in ops) + bytes([ipp.END])
+        conn = http.client.HTTPConnection("localhost", port, timeout=10)
+        conn.request("POST", "/ipp/print", body + data, {"Content-Type": "application/ipp"})
+        return ipp.Request(conn.getresponse().read())
+
+    def test_print_job_dry_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            printer = server.Printer("127.0.0.1", "test", 0, dry_run=td)
+            httpd = server.make_server(0)
+            httpd.printer = printer
+            port = httpd.server_address[1]
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            try:
+                attrs = self.call(port, 0x000B, [])
+                self.assertEqual(attrs.operation, ipp.OK)
+                self.assertIn("image/urf", attrs.values("document-format-supported"))
+                g, body = Raster().sample()
+                hdr = bytearray(32)
+                hdr[0] = 8
+                struct.pack_into(">III", hdr, 12, g.shape[1], g.shape[0], 600)
+                urf = b"UNIRAST\x00" + struct.pack(">I", 1) + bytes(hdr) + bytes(body)
+                job = self.call(port, 0x0002, [(ipp.MIME, "document-format", ["image/urf"])], urf)
+                self.assertEqual(job.operation, ipp.OK)
+                job_id = job.get("job-id")
+                for _ in range(100):
+                    state = self.call(port, 0x0009, [(ipp.INTEGER, "job-id", [job_id])]).get("job-state")
+                    if state in (server.COMPLETED, server.ABORTED):
+                        break
+                    time.sleep(0.2)
+                self.assertEqual(state, server.COMPLETED)
+                jobs = [f for f in os.listdir(td) if f.endswith(".job")]
+                self.assertEqual(len(jobs), 1)
+                problems, _ = device.validate(open(os.path.join(td, jobs[0]), "rb").read())
+                self.assertEqual(problems, [])
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
 
 
 if __name__ == "__main__":

@@ -1,28 +1,19 @@
 #!/bin/zsh
-# Start the LBP6030w Printer Application on this Mac: an IPP Everywhere / AirPrint printer (ippeveprinter)
-# that Macs and iPhones on the same network find by themselves. Stop it with Ctrl-C.
+# Start the LBP6030w Printer Application on this Mac: an AirPrint / IPP Everywhere printer that Macs and iPhones on
+# the same network find by themselves. Stop it with Ctrl-C.
 #
 # usage: printer-app/lbp6030-printer-app PRINTER_IP ["Printer name"]        (or set LBP6030_HOST)
-# env:   LBP6030_PORT (default 8631)  LBP6030_DRY_RUN_DIR (write jobs there instead of printing)  VERBOSE=1
-set -e
+# env:   LBP6030_PORT (default 8631)  LBP6030_DRY_RUN_DIR (write jobs there instead of printing)
 DIR="${0:A:h}"
 PRINTER="${1:-$LBP6030_HOST}"
 [ -n "$PRINTER" ] || { echo "usage: $0 PRINTER_IP [\"Printer name\"]  (or set LBP6030_HOST)"; exit 1; }
 NAME="${2:-LBP6030w}"
-PORT="${LBP6030_PORT:-8631}"
-SPOOL="${TMPDIR:-/tmp}/lbp6030-printer-app"
-mkdir -p "$SPOOL"
-python3 -c "import numpy, PIL" 2>/dev/null || { echo "needs Python 3 with numpy and Pillow: python3 -m pip install numpy pillow"; exit 1; }
 
-# macOS's own ippeveprinter (CUPS 2.3.4) rejects the Create-Job requests iOS sends; CUPS 2.4 from Homebrew works.
-IPPEVE=/usr/bin/ippeveprinter
-for p in /opt/homebrew/opt/cups/bin/ippeveprinter /usr/local/opt/cups/bin/ippeveprinter; do
-    [ -x "$p" ] && { IPPEVE="$p"; break; }
-done
-[ "$IPPEVE" = /usr/bin/ippeveprinter ] && echo "warning: iPhones and iPads can't print with macOS's ippeveprinter; run: brew install cups"
-
-# Not passed as -D: with -D, ippeveprinter holds its own (empty) connection to the printer while the command runs.
-export LBP6030_DEVICE_URI="socket://$PRINTER:9100"
-echo "Printer Application '$NAME' -> $LBP6030_DEVICE_URI, IPP on port $PORT, advertised via Bonjour (AirPrint)"
-exec "$IPPEVE" ${VERBOSE:+-v} -p "$PORT" -d "$SPOOL" -r _print,_universal \
-    -a "$DIR/lbp6030.conf" -c "$DIR/lbp6030-command" "$NAME"
+if ! python3 -c "import numpy, PIL" 2>/dev/null; then
+    MSG="Python with numpy and Pillow not found. Run printer-app/install.sh again (or: python3 -m pip install numpy pillow)."
+    echo "$MSG"
+    osascript -e "display notification \"$MSG\" with title \"LBP6030 Printer App\"" 2>/dev/null
+    exit 0      # a clean exit: launchd does not restart the job until this is fixed
+fi
+cd "${DIR:h}" && exec python3 -m lbp6030 serve "$PRINTER" --name "$NAME" --port "${LBP6030_PORT:-8631}" \
+    ${LBP6030_DRY_RUN_DIR:+--dry-run "$LBP6030_DRY_RUN_DIR"}

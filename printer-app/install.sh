@@ -1,7 +1,8 @@
 #!/bin/zsh
-# Install the printer app as a LaunchAgent: it starts at login, restarts if it stops, and logs to
-# ~/Library/Logs/lbp6030-printer-app.log. It runs inside a small "LBP6030 Printer App" launcher (built here from
-# launcher.swift), so macOS shows that name under Login Items and Local Network.
+# Install the printer app as a LaunchAgent: it starts at login and logs to ~/Library/Logs/lbp6030-printer-app.log.
+# It gets its own Python environment (build/venv: Apple's Python from the Xcode Command Line Tools, with numpy and
+# Pillow from PyPI) and runs inside a small "LBP6030 Printer App" launcher (launcher.swift), so macOS shows that name
+# under Login Items and Local Network.
 #
 # usage: printer-app/install.sh PRINTER_IP ["Printer name"]
 #        printer-app/install.sh --uninstall
@@ -11,11 +12,13 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$HOME/Library/Logs/lbp6030-printer-app.log"
 DOMAIN="gui/$(id -u)"
 DIR="${0:A:h}"
-APP="${DIR:h}/build/LBP6030 Printer App.app"
+BUILD="${DIR:h}/build"
+APP="$BUILD/LBP6030 Printer App.app"
+VENV="$BUILD/venv"
 
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 if [ "$1" = --uninstall ]; then
-    rm -rf "$PLIST" "$APP"
+    rm -rf "$PLIST" "$APP" "$VENV"
     echo "Removed $LABEL"
     exit 0
 fi
@@ -23,10 +26,21 @@ fi
 PRINTER="$1"
 NAME="${2:-LBP6030w}"
 [ -n "$PRINTER" ] || { echo "usage: $0 PRINTER_IP [\"Printer name\"]   or   $0 --uninstall"; exit 1; }
-# launchd starts with a minimal PATH; keep the python3 that has numpy and Pillow installed.
-PY="$(command -v python3)"
-"$PY" -c "import numpy, PIL" 2>/dev/null || { echo "needs Python 3 with numpy and Pillow: python3 -m pip install numpy pillow"; exit 1; }
+xcode-select -p >/dev/null 2>&1 || { echo "needs the Xcode Command Line Tools: xcode-select --install"; exit 1; }
 
+# Python environment independent of Homebrew: Apple's Python (or $PYTHON) with numpy and Pillow.
+if ! "$VENV/bin/python3" -c "import numpy, PIL" 2>/dev/null; then
+    echo "Setting up the Python environment in $VENV (downloads numpy and Pillow) ..."
+    rm -rf "$VENV"
+    "${PYTHON:-/usr/bin/python3}" -m venv "$VENV"
+    "$VENV/bin/python3" -m pip install --quiet --upgrade pip
+    "$VENV/bin/python3" -m pip install --quiet numpy pillow
+fi
+"$VENV/bin/python3" -c "import numpy, PIL"
+
+# The launcher is only rebuilt when launcher.swift changes: a rebuilt app is a new app to macOS, which would ask for
+# the Local Network permission again.
+if [ ! -x "$APP/Contents/MacOS/lbp6030-printer-app" ] || [ "$DIR/launcher.swift" -nt "$APP/Contents/MacOS/lbp6030-printer-app" ]; then
 mkdir -p "$APP/Contents/MacOS"
 swiftc -O "$DIR/launcher.swift" -o "$APP/Contents/MacOS/lbp6030-printer-app"
 cat > "$APP/Contents/Info.plist" <<EOF
@@ -45,7 +59,10 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 codesign --force --sign - "$APP"
+fi
 
+# KeepAlive restarts the job only after a failure: a clean exit (e.g. missing Python packages, reported with a
+# notification) stays stopped instead of looping.
 mkdir -p "${PLIST:h}" "${LOG:h}"
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -63,10 +80,11 @@ cat > "$PLIST" <<EOF
   <key>AssociatedBundleIdentifiers</key><string>$LABEL</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>${PY:h}:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PATH</key><string>$VENV/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>60</integer>
   <key>StandardOutPath</key><string>$LOG</string>
   <key>StandardErrorPath</key><string>$LOG</string>
 </dict>

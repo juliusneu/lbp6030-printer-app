@@ -1,8 +1,9 @@
-"""Command line: python3 -m lbp6030 {print,status,validate} ...
+"""Command line: python3 -m lbp6030 {print,status,validate,serve} ...
 
   print FILE      render a PDF / JPEG / PNG / PWG Raster / URF file and print it (or --dry-run to a job file)
   status          read-only printer status over SNMP
   validate JOB    check that a job file is complete and decodes cleanly
+  serve PRINTER   run the AirPrint / IPP Everywhere printer (printer-app/ starts this)
 The printer address comes from --printer or the LBP6030_HOST environment variable.
 """
 import argparse
@@ -41,8 +42,19 @@ def main(argv=None):
     s.add_argument("--printer", default=os.environ.get("LBP6030_HOST"))
     v = sub.add_parser("validate")
     v.add_argument("job")
+    sv = sub.add_parser("serve")
+    sv.add_argument("printer", nargs="?", default=os.environ.get("LBP6030_HOST"))
+    sv.add_argument("--name", default="LBP6030w", help="printer name shown to clients")
+    sv.add_argument("--port", type=int, default=8631)
+    sv.add_argument("--dry-run", metavar="DIR", help="write jobs to DIR instead of printing")
+    sv.add_argument("--no-bonjour", action="store_true")
     a = ap.parse_args(argv)
 
+    if a.cmd == "serve":
+        if not a.printer:
+            ap.error("give the printer address or set LBP6030_HOST")
+        from .server import serve
+        return serve(a.printer, a.name, a.port, a.dry_run, bonjour=not a.no_bonjour)
     if a.cmd == "validate":
         problems, info = device.validate(open(a.job, "rb").read())
         print(info)
