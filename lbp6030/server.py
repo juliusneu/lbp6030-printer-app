@@ -18,9 +18,11 @@ import uuid
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import device, ipp, jobwriter, media, printjob
+from . import device, ipp, jobwriter, media, printjob, render
 
 FORMATS = ["application/octet-stream", "image/jpeg", "image/pwg-raster", "image/urf"]
+PDF_VERSIONS = ["adobe-1.3", "adobe-1.4", "adobe-1.5", "adobe-1.6", "adobe-1.7", "iso-32000-1_2008"]
+MAKE_AND_MODEL = "Canon LBP6030w (open printer app)"
 URF = "V1.4,W8,RS600,CP1,PQ3-4-5,MT1-2-3-4-5-6"
 MARGIN = 500                              # 5 mm, in 1/100 mm
 MAX_COPIES, MAX_SHEETS = 99, 100
@@ -114,6 +116,8 @@ class Printer:
         # links clients open themselves (web page, icons): by Bonjour name, since the address a client connected to
         # may be an IPv6 link-local one it cannot use in a link
         self.web = f"http://{bonjour_host()}:{port}"
+        # PDF where the Quartz renderer exists (macOS): clients then send the document itself instead of pixels
+        self.formats = FORMATS + (["application/pdf"] if render.quartz_binary() else [])
         self.started = time.time()
         self.jobs, self.next_id, self.lock = {}, 1, threading.Lock()
         self.queue = queue.Queue()
@@ -157,7 +161,7 @@ class Printer:
             return reply(ipp.OK, [(ipp.PRINTER, attrs)])
         if op in ("Validate-Job", "Create-Job", "Print-Job"):
             fmt = req.get("document-format")
-            if fmt and fmt not in FORMATS:
+            if fmt and fmt not in self.formats:
                 return reply(ipp.FORMAT_NOT_SUPPORTED, [(ipp.UNSUPPORTED, [(ipp.MIME, "document-format", [fmt])])],
                              message="Unsupported document format.")
             copies = req.get("copies", 1, group=ipp.JOB)
@@ -187,7 +191,7 @@ class Printer:
             if op == "Send-Document":
                 last = bool(req.get("last-document", True))
                 fmt = req.get("document-format")
-                if fmt and fmt not in FORMATS:
+                if fmt and fmt not in self.formats:
                     return reply(ipp.FORMAT_NOT_SUPPORTED, [(ipp.UNSUPPORTED, [(ipp.MIME, "document-format", [fmt])])],
                                  message="Unsupported document format.")
                 bad = self._check_compression(req, reply)
@@ -307,7 +311,7 @@ class Printer:
             (ipp.INTEGER, "printer-state-change-time", [1]),
             (ipp.BOOLEAN, "preferred-attributes-supported", [False]),
             (ipp.KEYWORD, "printer-get-attributes-supported", ["document-format"]),
-            (ipp.TEXT, "printer-make-and-model", ["Canon LBP6030w (open printer app)"]),
+            (ipp.TEXT, "printer-make-and-model", [MAKE_AND_MODEL]),
             (ipp.TEXT, "printer-device-id", ["MFG:Canon;MDL:LBP6030w;CMD:PWG,URF;"]),
             (ipp.URI, "printer-uuid", [f"urn:uuid:{self.uuid}"]),
             (ipp.URI, "printer-more-info", [f"{self.web}/"]),
@@ -327,7 +331,7 @@ class Printer:
             (ipp.KEYWORD, "ipp-features-supported", ["ipp-everywhere"]),
             (ipp.KEYWORD, "compression-supported", ["deflate", "gzip", "none"]),
             (ipp.MIME, "document-format-default", ["application/octet-stream"]),
-            (ipp.MIME, "document-format-supported", FORMATS),
+            (ipp.MIME, "document-format-supported", self.formats),
             (ipp.KEYWORD, "pdl-override-supported", ["attempted"]),
             (ipp.BOOLEAN, "multiple-document-jobs-supported", [False]),
             (ipp.INTEGER, "multiple-operation-time-out", [60]),
@@ -352,6 +356,8 @@ class Printer:
             (ipp.KEYWORD, "media-type-supported", list(jobwriter.MEDIA_TYPES) + ["envelope"]),
             (ipp.KEYWORD, "media-type-default", ["stationery"]),
         ] + [(ipp.INTEGER, f"media-{side}-margin-supported", [MARGIN]) for side in ("bottom", "left", "right", "top")]
+        if "application/pdf" in self.formats:
+            a.append((ipp.KEYWORD, "pdf-versions-supported", PDF_VERSIONS))
         a += [
             (ipp.INTEGER, "copies-default", [1]),
             (ipp.RANGE, "copies-supported", [(1, 99)]),
@@ -643,9 +649,10 @@ class Server(ThreadingHTTPServer):
 
 def advertise(printer):
     """Bonjour: dns-sd on macOS, avahi-publish elsewhere; returns the process (or None)"""
-    txt = ["txtvers=1", "qtotal=1", "rp=ipp/print", f"ty={printer.name}", "product=(LBP6030w)", "note=",
+    pdl = ",".join(f for f in printer.formats if f != "application/octet-stream")
+    txt = ["txtvers=1", "qtotal=1", "rp=ipp/print", f"ty={MAKE_AND_MODEL}", "product=(LBP6030w)", "note=",
            f"adminurl={printer.web}/",
-           "pdl=image/pwg-raster,image/urf", f"URF={URF}", "Color=F", "Duplex=F", f"UUID={printer.uuid}",
+           f"pdl={pdl}", f"URF={URF}", "Color=F", "Duplex=F", f"UUID={printer.uuid}",
            "kind=document", "PaperMax=legal-A4", "priority=0"]
     if shutil.which("dns-sd"):
         cmd = ["dns-sd", "-R", printer.name, "_ipp._tcp,_universal,_print", "local", str(printer.port)] + txt

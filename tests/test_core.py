@@ -14,6 +14,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from lbp6030 import bandcodec, decode, device, ipp, jobwriter, media, pipeline, render, server  # noqa: E402
 
 
+def read(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
 class Codec(unittest.TestCase):
     def test_roundtrip(self):
         rng = np.random.default_rng(7)
@@ -166,8 +171,11 @@ class Server(unittest.TestCase):
             body += bytes([ipp.JOB]) + b"".join(ipp.encode_attr(*a) for a in job)
         body += bytes([ipp.END])
         conn = http.client.HTTPConnection("localhost", port, timeout=10)
-        conn.request("POST", "/ipp/print", body + data, {"Content-Type": "application/ipp"})
-        return ipp.Request(conn.getresponse().read())
+        try:
+            conn.request("POST", "/ipp/print", body + data, {"Content-Type": "application/ipp"})
+            return ipp.Request(conn.getresponse().read())
+        finally:
+            conn.close()
 
     def test_create_job_two_step_send(self):
         """CUPS clients send the document with last-document=false, then an empty Send-Document"""
@@ -201,6 +209,38 @@ class Server(unittest.TestCase):
                           self.urf())
                 self.assertEqual(self.call(port, 0x003B, [(ipp.INTEGER, "job-id", [job_id])]).operation, ipp.OK)
                 self.assertEqual(self.wait(port, job_id), server.COMPLETED)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+    @staticmethod
+    def pdf():
+        """one A4 page with a black 3 x 2 inch rectangle"""
+        content = b"0 g 72 600 216 144 re f"
+        objs = [b"<</Type/Catalog/Pages 2 0 R>>", b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+                b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Contents 4 0 R>>",
+                b"<</Length %d>>stream\n" % len(content) + content + b"\nendstream"]
+        out, offsets = bytearray(b"%PDF-1.4\n"), []
+        for k, obj in enumerate(objs, 1):
+            offsets.append(len(out))
+            out += b"%d 0 obj\n" % k + obj + b"\nendobj\n"
+        xref = len(out)
+        out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+        out += b"".join(b"%010d 00000 n \n" % o for o in offsets)
+        out += b"trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+        return bytes(out)
+
+    @unittest.skipUnless(sys.platform == "darwin" and render.quartz_binary(), "needs the Quartz renderer (macOS)")
+    def test_pdf_job(self):
+        with tempfile.TemporaryDirectory() as td:
+            httpd, port = self.start(td)
+            try:
+                self.assertIn("application/pdf", self.call(port, 0x000B, []).values("document-format-supported"))
+                job = self.call(port, 0x0002, [(ipp.MIME, "document-format", ["application/pdf"])], self.pdf())
+                self.assertEqual(self.wait(port, job.get("job-id")), server.COMPLETED)
+                name = [f for f in os.listdir(td) if f.endswith(".job")][0]
+                page = decode.to_array(decode.decode_job_bytes(read(os.path.join(td, name)))[0])
+                self.assertGreater(int((page == 14).sum()), 1_000_000)        # the black rectangle
             finally:
                 httpd.shutdown()
                 httpd.server_close()
@@ -240,7 +280,7 @@ class Server(unittest.TestCase):
                 self.assertEqual(self.wait(port, job.get("job-id")), server.COMPLETED)
                 jobs = [f for f in os.listdir(td) if f.endswith(".job")]
                 self.assertEqual(len(jobs), 1)
-                problems, _ = device.validate(open(os.path.join(td, jobs[0]), "rb").read())
+                problems, _ = device.validate(read(os.path.join(td, jobs[0])))
                 self.assertEqual(problems, [])
             finally:
                 httpd.shutdown()

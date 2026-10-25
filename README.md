@@ -45,7 +45,9 @@ printer-app/lbp6030-printer-app 192.168.1.50 "LBP6030w"     # in a terminal, sto
 printer-app/install.sh 192.168.1.50 "LBP6030w"              # background job (LaunchAgent)
 printer-app/install.sh --uninstall
 ```
-Then add the printer in System Settings > Printers & Scanners; iPhones see it in the Print dialog. The background
+Then add the printer in System Settings > Printers & Scanners; iPhones see it in the Print dialog. The printer app
+accepts PDF (rendered with Quartz, like the command line, so Macs send the document rather than pixels), Apple
+Raster, PWG Raster and JPEG. The background
 job runs inside a small launcher, "LBP6030 Printer App", which `install.sh` builds into `build/`. It logs to
 `~/Library/Logs/lbp6030-printer-app.log` and shows up under System Settings > General > Login Items & Extensions.
 If it cannot start (for example when its Python environment is missing), it shows a notification and stays
