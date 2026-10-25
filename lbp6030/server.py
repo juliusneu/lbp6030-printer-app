@@ -596,8 +596,13 @@ def advertise(printer):
     return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+class Stopped(Exception):
+    """SIGTERM from outside: exit with an error code so that launchd starts the printer app again (a bootout or
+    uninstall removes the job, so nothing restarts then)"""
+
+
 def _stop(*_):
-    raise KeyboardInterrupt
+    raise Stopped
 
 
 class Server4(Server):
@@ -623,13 +628,17 @@ def serve(host, name="LBP6030w", port=8631, dry_run=None, bonjour=True):
     bonjour_proc = advertise(printer) if bonjour else None
     signal.signal(signal.SIGTERM, _stop)
     log(f"'{name}' on port {port} -> {host}:9100{' (dry run: ' + dry_run + ')' if dry_run else ''}")
+    code = 0
     try:
         httpd.serve_forever()
-    except KeyboardInterrupt:
+    except KeyboardInterrupt:              # Ctrl-C in a terminal
         pass
+    except Stopped:
+        log("stopped (SIGTERM)")
+        code = 143
     finally:
         if bonjour_proc:
             bonjour_proc.terminate()
         httpd.server_close()
         shutil.rmtree(printer.spool, ignore_errors=True)
-    return 0
+    return code
