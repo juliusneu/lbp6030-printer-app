@@ -1,5 +1,6 @@
 """AirPrint / IPP Everywhere printer: a small IPP server with the operations iOS and macOS use, advertised with
 Bonjour, printing through printjob and device. Jobs run one at a time in a worker thread."""
+import html
 import os
 import queue
 import re
@@ -43,6 +44,17 @@ def ipp_time(t):
     """RFC 2579 dateTime in UTC"""
     g = time.gmtime(t)
     return struct.pack(">HBBBBBBcBB", g.tm_year, g.tm_mon, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec, 0, b"+", 0, 0)
+
+
+def bonjour_host():
+    """the name Bonjour clients resolve (<LocalHostName>.local), not the system hostname, which some network
+    software changes"""
+    try:
+        name = subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True, text=True,
+                              timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        name = ""
+    return (name or socket.gethostname().split(".")[0]) + ".local"
 
 
 def log(msg):
@@ -99,6 +111,9 @@ class Printer:
         self.host, self.name, self.port, self.dry_run = host, name, port, dry_run
         self.spool = spool or tempfile.mkdtemp(prefix="lbp6030-")
         self.uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"lbp6030-printer-app:{socket.gethostname()}:{name}"))
+        # links clients open themselves (web page, icons): by Bonjour name, since the address a client connected to
+        # may be an IPv6 link-local one it cannot use in a link
+        self.web = f"http://{bonjour_host()}:{port}"
         self.started = time.time()
         self.jobs, self.next_id, self.lock = {}, 1, threading.Lock()
         self.queue = queue.Queue()
@@ -284,7 +299,7 @@ class Printer:
             (ipp.UNKNOWN, "printer-geo-location", [None]),
             (ipp.TEXT, "printer-organization", [""]),
             (ipp.TEXT, "printer-organizational-unit", [""]),
-            (ipp.URI, "printer-supply-info-uri", [f"http://{uri_host}/"]),
+            (ipp.URI, "printer-supply-info-uri", [f"{self.web}/"]),
             (ipp.DATETIME, "printer-current-time", [ipp_time(now)]),
             (ipp.DATETIME, "printer-config-change-date-time", [ipp_time(self.started)]),
             (ipp.INTEGER, "printer-config-change-time", [1]),
@@ -295,8 +310,8 @@ class Printer:
             (ipp.TEXT, "printer-make-and-model", ["Canon LBP6030w (open printer app)"]),
             (ipp.TEXT, "printer-device-id", ["MFG:Canon;MDL:LBP6030w;CMD:PWG,URF;"]),
             (ipp.URI, "printer-uuid", [f"urn:uuid:{self.uuid}"]),
-            (ipp.URI, "printer-more-info", [f"http://{uri_host}/"]),
-            (ipp.URI, "printer-icons", [f"http://{uri_host}/{n}" for n in ICONS]),
+            (ipp.URI, "printer-more-info", [f"{self.web}/"]),
+            (ipp.URI, "printer-icons", [f"{self.web}/{n}" for n in ICONS]),
             (ipp.ENUM, "printer-state", [4 if busy else 3]),
             (ipp.KEYWORD, "printer-state-reasons", reasons),
             (ipp.TEXT, "printer-state-message", ["Printing." if busy else "Idle."]),
@@ -510,6 +525,55 @@ class Printer:
                     log(f"status: {e}")
 
 
+REASONS = {"media-empty-error": "Out of paper", "media-low-warning": "Paper low", "media-jam-error": "Paper jam",
+           "door-open-error": "Door open", "toner-empty-error": "Toner empty", "toner-low-warning": "Toner low",
+           "offline-report": "Not reachable (switched off?)", "other-error": "Needs attention"}
+PAGE_STYLE = """
+body { font: 18px/1.5 -apple-system, system-ui, sans-serif; margin: 0 auto; max-width: 36rem; padding: 1.2rem;
+       background: #fff; color: #1d1d1f; }
+header { display: flex; align-items: center; gap: 1rem; }
+header img { width: 96px; height: 96px; }
+h1 { font-size: 1.6rem; margin: 0; }
+.state { font-size: 1.25rem; font-weight: 600; }
+.ok { color: #1a7f37; } .warn { color: #b35900; } .err { color: #c62828; }
+.bar { height: 0.8rem; border-radius: 0.4rem; background: #e5e5ea; overflow: hidden; margin: 0.3rem 0 1rem; }
+.bar div { height: 100%; background: #3a3a3c; }
+ul { list-style: none; padding: 0; } li { padding: 0.6rem 0; border-top: 1px solid #e5e5ea; }
+.meta { color: #6e6e73; font-size: 0.95rem; }
+@media (prefers-color-scheme: dark) {
+  body { background: #1c1c1e; color: #f2f2f7; } .bar, li { background: none; border-color: #3a3a3c; }
+  .bar { background: #3a3a3c; } .bar div { background: #d1d1d6; } .meta { color: #a1a1a6; } }
+"""
+
+
+def status_page(p):
+    """small status page (printer-more-info / adminurl): state, toner, recent jobs"""
+    st = p.status
+    if p.current is not None:
+        state, cls = "Printing", "ok"
+    elif st["reasons"]:
+        state = ", ".join(REASONS.get(r, r) for r in st["reasons"])
+        cls = "warn" if all(r.endswith("-warning") for r in st["reasons"]) else "err"
+    else:
+        state, cls = "Ready", "ok"
+    toner = ""
+    if st.get("toner_level") is not None:
+        level = max(0, min(100, st["toner_level"]))
+        toner = (f"<p>Toner {level} %</p><div class=bar><div style='width:{level}%'></div></div>")
+    with p.lock:
+        jobs = sorted(p.jobs.values(), key=lambda j: j.id, reverse=True)[:10]
+    rows = "".join(
+        f"<li>{html.escape(j.name)}<br><span class=meta>{JOB_STATES[j.state]}, "
+        f"{time.strftime('%H:%M', time.localtime(j.completed or j.created))}"
+        f"{' - ' + html.escape(j.message) if j.message else ''}</span></li>" for j in jobs) or "<li class=meta>None</li>"
+    return (f"<!doctype html><html><head><meta charset=utf-8>"
+            f"<meta name=viewport content='width=device-width, initial-scale=1'><title>{html.escape(p.name)}</title>"
+            f"<link rel=icon href=/icon-sm.png><style>{PAGE_STYLE}</style></head><body>"
+            f"<header><img src=/icon.png alt=''><div><h1>{html.escape(p.name)}</h1>"
+            f"<div class='state {cls}'>{state}</div></div></header>"
+            f"<p class=meta>Printer at {html.escape(p.host)}</p>{toner}<h2>Recent jobs</h2><ul>{rows}</ul></body></html>")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "lbp6030-printer-app"
@@ -554,19 +618,16 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, "application/ipp", self.server.printer.handle(body, self.headers.get("Host")))
 
     def do_GET(self):
-        name = self.path.lstrip("/")
+        log(f"GET {self.path} from {self.client_address[0]}")
+        name = self.path.split("?")[0].lstrip("/")
+        if name in ("favicon.ico", "apple-touch-icon.png"):
+            name = "icon-sm.png" if name == "favicon.ico" else "icon.png"
         if name in ICONS:
             with open(os.path.join(ICON_DIR, ICONS[name]), "rb") as f:
                 return self._send(200, "image/png", f.read())
-        if self.path != "/":
+        if name not in ("", "index.html"):
             return self._send(404, "text/plain", b"not found\n")
-        p = self.server.printer
-        st = p.status
-        state = ", ".join(st["reasons"]) or "ok"
-        toner = "" if st.get("toner_level") is None else f", toner {st['toner_level']} %"
-        text = (f"<html><head><title>{p.name}</title></head><body><h1>{p.name}</h1>"
-                f"<p>Printer {p.host}: {state}{toner}</p><p>{len(p.jobs)} recent job(s).</p></body></html>")
-        self._send(200, "text/html; charset=utf-8", text.encode())
+        self._send(200, "text/html; charset=utf-8", status_page(self.server.printer).encode())
 
 
 class Server(ThreadingHTTPServer):
@@ -583,6 +644,7 @@ class Server(ThreadingHTTPServer):
 def advertise(printer):
     """Bonjour: dns-sd on macOS, avahi-publish elsewhere; returns the process (or None)"""
     txt = ["txtvers=1", "qtotal=1", "rp=ipp/print", f"ty={printer.name}", "product=(LBP6030w)", "note=",
+           f"adminurl={printer.web}/",
            "pdl=image/pwg-raster,image/urf", f"URF={URF}", "Color=F", "Duplex=F", f"UUID={printer.uuid}",
            "kind=document", "PaperMax=legal-A4", "priority=0"]
     if shutil.which("dns-sd"):
