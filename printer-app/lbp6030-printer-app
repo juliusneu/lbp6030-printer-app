@@ -15,5 +15,6 @@ if ! python3 -c "import numpy, PIL" 2>/dev/null; then
     osascript -e "display notification \"$MSG\" with title \"LBP6030 Printer App\"" 2>/dev/null
     exit 0      # a clean exit: launchd does not restart the job until this is fixed
 fi
-cd "${DIR:h}" && exec python3 -m lbp6030 serve "$PRINTER" --name "$NAME" --port "${LBP6030_PORT:-8631}" \
-    ${LBP6030_DRY_RUN_DIR:+--dry-run "$LBP6030_DRY_RUN_DIR"}
+args=(serve "$PRINTER" --name "$NAME" --port "${LBP6030_PORT:-8631}")
+[ -n "$LBP6030_DRY_RUN_DIR" ] && args+=(--dry-run "${LBP6030_DRY_RUN_DIR:a}")   # :a = absolute (we cd below)
+cd "${DIR:h}" && exec python3 -m lbp6030 "${args[@]}"

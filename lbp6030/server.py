@@ -22,6 +22,10 @@ from . import device, ipp, jobwriter, media, printjob
 FORMATS = ["application/octet-stream", "image/jpeg", "image/pwg-raster", "image/urf"]
 URF = "V1.4,W8,RS600,CP1,PQ3-4-5,MT1-2-3-4-5-6"
 MARGIN = 500                              # 5 mm, in 1/100 mm
+MAX_COPIES, MAX_SHEETS = 99, 100
+MAX_REQUEST = 1 << 30                     # request bodies and decompressed documents
+JOB_TIMEOUT = 60                          # multiple-operation-time-out: a created job must get its document by then
+COMPRESSIONS = ("none", "gzip", "deflate")
 OPERATIONS = {0x0002: "Print-Job", 0x0004: "Validate-Job", 0x0005: "Create-Job", 0x0006: "Send-Document",
               0x0008: "Cancel-Job", 0x0009: "Get-Job-Attributes", 0x000A: "Get-Jobs",
               0x000B: "Get-Printer-Attributes", 0x0039: "Cancel-My-Jobs", 0x003B: "Close-Job",
@@ -76,14 +80,14 @@ def paper_for_size(x, y):
 class Job:
     def __init__(self, job_id, request):
         self.id = job_id
-        self.name = request.get("job-name", f"Job {job_id}")
-        self.user = request.get("requesting-user-name", "anonymous")
+        self.name = jobwriter.short_name(str(request.get("job-name") or f"Job {job_id}"), 255)
+        self.user = jobwriter.short_name(str(request.get("requesting-user-name") or "anonymous"), 255)
         self.attrs = request.group(ipp.JOB)
         self.format = request.get("document-format", "application/octet-stream")
         self.state, self.reasons, self.message = PENDING, ["job-incoming"], ""
         self.created, self.processing, self.completed = time.time(), None, None
         self.impressions = 0
-        self.document = None
+        self.document, self.queued = None, False
 
     def value(self, name, default=None):
         tag_values = self.attrs.get(name)
@@ -122,7 +126,8 @@ class Printer:
                 or not ({"printer-uri", "job-uri"} & set(names))):
             return reply(ipp.BAD_REQUEST, message="Missing required attributes.")
         op = OPERATIONS.get(req.operation)
-        log(f"{op or hex(req.operation)} from {req.get('requesting-user-name', '?')}")
+        if op not in ("Get-Printer-Attributes", "Get-Job-Attributes", "Get-Jobs"):
+            log(f"{op or hex(req.operation)} from {req.get('requesting-user-name', '?')}")
         try:
             return self._operation(req, op, host or f"localhost:{self.port}", reply)
         except Exception as e:  # noqa: BLE001
@@ -140,11 +145,22 @@ class Printer:
             if fmt and fmt not in FORMATS:
                 return reply(ipp.FORMAT_NOT_SUPPORTED, [(ipp.UNSUPPORTED, [(ipp.MIME, "document-format", [fmt])])],
                              message="Unsupported document format.")
+            copies = req.get("copies", 1, group=ipp.JOB)
+            if not isinstance(copies, int) or not 1 <= copies <= MAX_COPIES:
+                return reply(ipp.ATTRIBUTES_NOT_SUPPORTED,
+                             [(ipp.UNSUPPORTED, [(ipp.INTEGER, "copies", [copies if isinstance(copies, int) else 0])])],
+                             message=f"copies must be 1 to {MAX_COPIES}.")
+            bad = self._check_compression(req, reply)
+            if bad:
+                return bad
             if op == "Validate-Job":
                 return reply(ipp.OK)
             job = self._new_job(req)
             if op == "Print-Job":
-                self._add_document(job, req, last=True)
+                error = self._add_document(job, req, last=True)
+                if error:
+                    return reply(ipp.COMPRESSION_ERROR, [(ipp.JOB, self.job_attributes(job, uri_host, brief=True))],
+                                 message=error)
             return reply(ipp.OK, [(ipp.JOB, self.job_attributes(job, uri_host, brief=True))])
         if op in ("Send-Document", "Cancel-Job", "Get-Job-Attributes", "Close-Job"):
             job_id = req.get("job-id")
@@ -155,32 +171,47 @@ class Printer:
                 return reply(ipp.NOT_FOUND, message="Job not found.")
             if op == "Send-Document":
                 last = bool(req.get("last-document", True))
-                if job.state != PENDING or (job.document is not None and req.data):
+                fmt = req.get("document-format")
+                if fmt and fmt not in FORMATS:
+                    return reply(ipp.FORMAT_NOT_SUPPORTED, [(ipp.UNSUPPORTED, [(ipp.MIME, "document-format", [fmt])])],
+                                 message="Unsupported document format.")
+                bad = self._check_compression(req, reply)
+                if bad:
+                    return bad
+                if job.state != PENDING or job.queued or (job.document is not None and req.data):
                     return reply(ipp.NOT_POSSIBLE, message="Job is not accepting documents (one document per job).")
-                if job.document is None:
-                    self._add_document(job, req, last)
+                if job.document is None and (req.data or last):
+                    error = self._add_document(job, req, last)
+                    if error:
+                        return reply(ipp.COMPRESSION_ERROR,
+                                     [(ipp.JOB, self.job_attributes(job, uri_host, brief=True))], message=error)
                 elif last:                       # an empty Send-Document that only closes the job
                     self._queue(job)
                 return reply(ipp.OK, [(ipp.JOB, self.job_attributes(job, uri_host, brief=True))])
             if op == "Cancel-Job":
-                if job.state != PENDING:
-                    return reply(ipp.NOT_POSSIBLE, message="Job can no longer be canceled.")
-                job.state, job.reasons, job.completed = CANCELED, ["job-canceled-by-user"], time.time()
+                with self.lock:
+                    if job.state != PENDING:
+                        return reply(ipp.NOT_POSSIBLE, message="Job can no longer be canceled.")
+                    self._finish(job, CANCELED, "job-canceled-by-user")
                 return reply(ipp.OK)
-            if op == "Close-Job":
+            if op == "Close-Job":                # like a last Send-Document without data (PWG 5100.11)
+                if job.document is not None:
+                    self._queue(job)
                 return reply(ipp.OK)
             return reply(ipp.OK, [(ipp.JOB, self.job_attributes(job, uri_host))])
         if op == "Get-Jobs":
             which = req.get("which-jobs", "not-completed")
             done = (CANCELED, ABORTED, COMPLETED)
-            jobs = [j for j in sorted(self.jobs.values(), key=lambda j: j.id)
-                    if which == "all" or (which == "completed") == (j.state in done)]
+            with self.lock:
+                snapshot = sorted(self.jobs.values(), key=lambda j: j.id)
+            jobs = [j for j in snapshot if which == "all" or (which == "completed") == (j.state in done)]
             return reply(ipp.OK, [(ipp.JOB, self.job_attributes(j, uri_host, brief=True)) for j in jobs])
         if op == "Cancel-My-Jobs":
-            user = req.get("requesting-user-name")
-            for j in list(self.jobs.values()):
-                if j.state == PENDING and j.user == user:
-                    j.state, j.reasons, j.completed = CANCELED, ["job-canceled-by-user"], time.time()
+            user = jobwriter.short_name(str(req.get("requesting-user-name") or "anonymous"), 255)
+            with self.lock:
+                for j in list(self.jobs.values()):
+                    if j.state == PENDING and j.user == user:
+                        self._finish(j, CANCELED, "job-canceled-by-user")
             return reply(ipp.OK)
         if op == "Identify-Printer":
             return reply(ipp.OK)
@@ -191,25 +222,50 @@ class Printer:
             job = Job(self.next_id, req)
             self.jobs[job.id] = job
             self.next_id += 1
-            for old in sorted(self.jobs)[:-50]:            # keep the last 50 jobs
-                del self.jobs[old]
+            done = [k for k in sorted(self.jobs) if self.jobs[k].state in (CANCELED, ABORTED, COMPLETED)]
+            for old in done[:max(0, len(self.jobs) - 50)]:         # keep the last 50 jobs
+                self._remove_document(self.jobs.pop(old))
         return job
 
+    def _check_compression(self, req, reply):
+        compression = req.get("compression", "none")
+        if compression in COMPRESSIONS:
+            return None
+        return reply(ipp.COMPRESSION_NOT_SUPPORTED, [(ipp.UNSUPPORTED, [(ipp.KEYWORD, "compression", [compression])])],
+                     message="Unsupported compression.")
+
+    def _finish(self, job, state, reason, message=""):
+        job.state, job.reasons, job.message, job.completed = state, [reason], message, time.time()
+        self._remove_document(job)
+
     def _add_document(self, job, req, last):
+        """store the document; bad compressed data aborts the job and returns an error message"""
         data = req.data
         compression = req.get("compression", "none")
         if compression in ("gzip", "deflate"):
-            data = zlib.decompress(data, 16 + zlib.MAX_WBITS if compression == "gzip" else -zlib.MAX_WBITS)
+            try:
+                d = zlib.decompressobj(16 + zlib.MAX_WBITS if compression == "gzip" else -zlib.MAX_WBITS)
+                data = d.decompress(data, MAX_REQUEST)
+                if d.unconsumed_tail or not d.eof:
+                    raise ValueError("truncated, or larger than 1 GB")
+            except (zlib.error, ValueError) as e:
+                self._finish(job, ABORTED, "compression-error", f"Bad {compression} data: {e}")
+                return f"Bad {compression} data."
         job.format = req.get("document-format", job.format)
+        os.makedirs(self.spool, exist_ok=True)         # macOS may clean up old temporary folders
         path = os.path.join(self.spool, f"job-{job.id}.data")
         with open(path, "wb") as f:
             f.write(data)
         job.document = path
         if last:
             self._queue(job)
+        return None
 
     def _queue(self, job):
-        job.reasons = ["job-queued"]
+        with self.lock:
+            if job.queued or job.state != PENDING:
+                return
+            job.queued, job.reasons = True, ["job-queued"]
         self.queue.put(job)
 
     def printer_attributes(self, uri_host):
@@ -358,11 +414,14 @@ class Printer:
     def _worker(self):
         while True:
             job = self.queue.get()
-            if job.state != PENDING:
+            with self.lock:
+                start = job.state == PENDING
+                if start:
+                    job.state, job.reasons, job.processing = PROCESSING, ["job-printing"], time.time()
+                    self.current = job
+            if not start:
                 self._remove_document(job)
                 continue
-            self.current = job
-            job.state, job.reasons, job.processing = PROCESSING, ["job-printing"], time.time()
             try:
                 ok, message = self._print(job)
                 job.state = COMPLETED if ok else ABORTED
@@ -389,14 +448,14 @@ class Printer:
         paper = paper or media.paper_from_ipp(job.value("media"))
         mtype = media.media_type_from_ipp((col.get("media-type", (0, [None]))[1][0] if col else None)
                                           or job.value("media-type"))
-        copies = max(1, int(job.value("copies", 1)))
+        copies = min(MAX_COPIES, max(1, int(job.value("copies", 1))))
         collate = job.value("multiple-document-handling", "") != "separate-documents-uncollated-copies"
         toner_save = job.value("print-quality") == 3
         fit = job.value("print-scaling", "auto") != "none"
         log(f"job {job.id}: {job.format} on {paper} ({mtype}), copies {copies}{'' if collate else ' uncollated'}")
         data, _ = printjob.make_job(job.document, job.format, paper, mtype, copies, collate, toner_save,
-                                    job_name=job.name, user=job.user, fit=fit)
-        problems, info = device.validate(data, 100)
+                                    job_name=job.name, user=job.user, fit=fit, max_sheets=MAX_SHEETS)
+        problems, info = device.validate(data, MAX_SHEETS)
         if problems:
             return False, "Job failed validation: " + "; ".join(problems)
         job.impressions = info["sheets"]
@@ -416,6 +475,8 @@ class Printer:
         if not st["reachable"]:
             return False, f"Printer {self.host} is not reachable (switched off?)"
         device.send(data, self.host)
+        if st["pages"] is None:
+            return True, "Sent; the printer reports no page counter, so printing is not confirmed."
         ok = device.wait_printed(self.host, st["pages"], info["sheets"], self._set_status, timeout=1800)
         return ok, "" if ok else "Timed out waiting for the printer."
 
@@ -429,19 +490,30 @@ class Printer:
         self._set_status(st)
         return st
 
+    def _expire_jobs(self):
+        now = time.time()
+        with self.lock:
+            for j in list(self.jobs.values()):
+                if j.state == PENDING and not j.queued and now - j.created > JOB_TIMEOUT:
+                    self._finish(j, ABORTED, "aborted-by-system", "No document received in time.")
+
     def _poll_status(self):
+        tick = 0
         while True:
-            if self.current is None:
+            time.sleep(5)
+            self._expire_jobs()
+            tick += 1
+            if tick % 6 == 1 and self.current is None:      # printer status every 30 s while idle
                 try:
                     self._refresh()
                 except Exception as e:  # noqa: BLE001
                     log(f"status: {e}")
-            time.sleep(30)
 
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "lbp6030-printer-app"
+    timeout = 60                                   # idle keep-alive connections
 
     def log_message(self, fmt, *args):
         pass
@@ -457,7 +529,12 @@ class Handler(BaseHTTPRequestHandler):
                     return bytes(data)
                 data += self.rfile.read(size)
                 self.rfile.readline(1024)
-        return self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                if len(data) > MAX_REQUEST:
+                    raise ValueError("request too large")
+        length = int(self.headers.get("Content-Length") or 0)
+        if not 0 <= length <= MAX_REQUEST:
+            raise ValueError("bad Content-Length")
+        return self.rfile.read(length)
 
     def _send(self, code, ctype, body):
         self.send_response(code)
@@ -467,7 +544,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
-        body = self._body()
+        try:
+            body = self._body()
+        except ValueError as e:
+            self.close_connection = True
+            return self._send(400, "text/plain", f"bad request: {e}\n".encode())
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/ipp":
             return self._send(400, "text/plain", b"expected application/ipp\n")
         self._send(200, "application/ipp", self.server.printer.handle(body, self.headers.get("Host")))
@@ -550,4 +631,5 @@ def serve(host, name="LBP6030w", port=8631, dry_run=None, bonjour=True):
         if bonjour_proc:
             bonjour_proc.terminate()
         httpd.server_close()
+        shutil.rmtree(printer.spool, ignore_errors=True)
     return 0

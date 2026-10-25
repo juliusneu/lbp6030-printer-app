@@ -56,7 +56,10 @@ def main(argv=None):
         from .server import serve
         return serve(a.printer, a.name, a.port, a.dry_run, bonjour=not a.no_bonjour)
     if a.cmd == "validate":
-        problems, info = device.validate(open(a.job, "rb").read())
+        try:
+            problems, info = device.validate(open(a.job, "rb").read())
+        except (ValueError, IndexError, OSError) as e:
+            problems, info = [f"not a valid job file: {e}"], {}
         print(info)
         print("OK" if not problems else "PROBLEMS: " + "; ".join(problems))
         return 0 if not problems else 1
@@ -67,7 +70,7 @@ def main(argv=None):
         return 0
     job, n = printjob.make_job(a.file, a.content_type, a.media, a.media_type, a.copies, not a.no_collate,
                                a.toner_save, job_name=os.path.basename(a.file), user=os.environ.get("USER", "user"),
-                               fit=not a.no_fit)
+                               fit=not a.no_fit, max_sheets=a.max_sheets)
     problems, info = device.validate(job, a.max_sheets)
     print(f"job: {len(job)} bytes, {info['pages']} page(s), {info['sheets']} sheet(s), {info.get('sizes')}")
     if problems:

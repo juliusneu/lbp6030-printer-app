@@ -112,6 +112,13 @@ class Raster(unittest.TestCase):
         struct.pack_into(">I", hdr, 400, 18)
         self.assertTrue(np.array_equal(render.read_pwg(b"RaS2" + bytes(hdr) + bytes(body))[0][0], g))
 
+    def test_size_limit(self):
+        hdr = bytearray(32)
+        hdr[0] = 8
+        struct.pack_into(">III", hdr, 12, 10000, 10000, 600)          # 124 bytes claiming a huge page
+        data = b"UNIRAST\x00" + struct.pack(">I", 1) + bytes(hdr) + bytes([255, 128] * 40)
+        self.assertRaises(ValueError, render.read_urf, data)
+
     def test_urf(self):
         g, body = self.sample()
         hdr = bytearray(32)
@@ -141,13 +148,23 @@ class Ipp(unittest.TestCase):
         self.assertEqual(req.values("requested-attributes"), ["a", "b"])
         self.assertEqual(req.get("media-col")["media-size"][1][0]["x-dimension"][1], [21000])
 
+    def test_malformed(self):
+        good = ipp.response(1, 0x000B, [])
+        for bad in (good[:12],                                          # truncated attribute
+                    good[:-1] + bytes([ipp.END_COLLECTION, 0, 0, 0, 0, ipp.END]),
+                    good[:-1] + bytes([ipp.MEMBER, 0, 0, 0, 1]) + b"x" + bytes([ipp.END]),
+                    good[:-1] + bytes([ipp.JOB, ipp.KEYWORD, 0, 0, 0, 1]) + b"x" + bytes([ipp.END])):
+            self.assertRaises(ValueError, ipp.Request, bad)
+
 
 class Server(unittest.TestCase):
-    def call(self, port, op, attrs, data=b""):
+    def call(self, port, op, attrs, data=b"", job=()):
         ops = [(ipp.CHARSET, "attributes-charset", ["utf-8"]), (ipp.LANGUAGE, "attributes-natural-language", ["en"]),
                (ipp.URI, "printer-uri", [f"ipp://localhost:{port}/ipp/print"])] + attrs
-        body = ipp.response(1, op, [])[:-1]      # header + charset/language group without the end tag
-        body = bytes(body[:8]) + bytes([ipp.OPERATION]) + b"".join(ipp.encode_attr(*a) for a in ops) + bytes([ipp.END])
+        body = ipp.response(1, op, [])[:8] + bytes([ipp.OPERATION]) + b"".join(ipp.encode_attr(*a) for a in ops)
+        if job:
+            body += bytes([ipp.JOB]) + b"".join(ipp.encode_attr(*a) for a in job)
+        body += bytes([ipp.END])
         conn = http.client.HTTPConnection("localhost", port, timeout=10)
         conn.request("POST", "/ipp/print", body + data, {"Content-Type": "application/ipp"})
         return ipp.Request(conn.getresponse().read())
@@ -162,6 +179,27 @@ class Server(unittest.TestCase):
                                                (ipp.MIME, "document-format", ["image/urf"])], self.urf())
                 two = self.call(port, 0x0006, [(ipp.INTEGER, "job-id", [job_id]), (ipp.BOOLEAN, "last-document", [True])])
                 self.assertEqual((one.operation, two.operation), (ipp.OK, ipp.OK))
+                self.assertEqual(self.wait(port, job_id), server.COMPLETED)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+    def test_refusals_and_close_job(self):
+        with tempfile.TemporaryDirectory() as td:
+            httpd, port = self.start(td)
+            try:
+                urf = (ipp.MIME, "document-format", ["image/urf"])
+                self.assertEqual(self.call(port, 0x0002, [urf], self.urf(), job=[(ipp.INTEGER, "copies", [500])]).operation,
+                                 ipp.ATTRIBUTES_NOT_SUPPORTED)
+                self.assertEqual(self.call(port, 0x0002, [urf, (ipp.KEYWORD, "compression", ["compress"])],
+                                           self.urf()).operation, ipp.COMPRESSION_NOT_SUPPORTED)
+                bad = self.call(port, 0x0002, [urf, (ipp.KEYWORD, "compression", ["gzip"])], b"not gzip")
+                self.assertEqual(bad.operation, ipp.COMPRESSION_ERROR)
+                self.assertEqual(self.wait(port, bad.get("job-id")), server.ABORTED)
+                job_id = self.call(port, 0x0005, []).get("job-id")
+                self.call(port, 0x0006, [(ipp.INTEGER, "job-id", [job_id]), (ipp.BOOLEAN, "last-document", [False]), urf],
+                          self.urf())
+                self.assertEqual(self.call(port, 0x003B, [(ipp.INTEGER, "job-id", [job_id])]).operation, ipp.OK)
                 self.assertEqual(self.wait(port, job_id), server.COMPLETED)
             finally:
                 httpd.shutdown()

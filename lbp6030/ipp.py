@@ -18,6 +18,9 @@ BAD_REQUEST = 0x0400
 NOT_POSSIBLE = 0x0404
 NOT_FOUND = 0x0406
 FORMAT_NOT_SUPPORTED = 0x040A
+ATTRIBUTES_NOT_SUPPORTED = 0x040B
+COMPRESSION_NOT_SUPPORTED = 0x040F
+COMPRESSION_ERROR = 0x0410
 OPERATION_NOT_SUPPORTED = 0x0501
 VERSION_NOT_SUPPORTED = 0x0503
 INTERNAL_ERROR = 0x0500
@@ -31,7 +34,10 @@ class Request:
         self.operation, self.request_id = struct.unpack(">HI", data[2:8])
         self.groups = []        # [(group tag, {name: (value tag, [values])})]
         self.data = b""         # document data after the attributes
-        self._parse(data, 8)
+        try:
+            self._parse(data, 8)
+        except (struct.error, IndexError, KeyError, TypeError) as e:
+            raise ValueError(f"malformed IPP message: {e!r}") from None
 
     def _parse(self, data, i):
         attrs, last, stack = None, None, []
@@ -42,35 +48,43 @@ class Request:
                 self.data = data[i:]
                 return
             if tag < 0x10:
-                attrs = {}
+                if stack:
+                    raise ValueError("group inside a collection")
+                attrs, last = {}, None
                 self.groups.append((tag, attrs))
                 continue
-            (n,) = struct.unpack(">H", data[i:i + 2])
-            name = data[i + 2:i + 2 + n].decode("utf-8", "replace")
-            i += 2 + n
-            (n,) = struct.unpack(">H", data[i:i + 2])
-            raw = data[i + 2:i + 2 + n]
-            i += 2 + n
+            name, i = _field(data, i)
+            raw, i = _field(data, i)
+            name = name.decode("utf-8", "replace")
             if attrs is None:
                 raise ValueError("attribute outside a group")
             if tag == BEGIN_COLLECTION:
                 coll = {}
                 if stack:
                     parent, member = stack[-1]
+                    if member is None:
+                        raise ValueError("collection value without a member name")
                     parent.setdefault(member, (tag, []))[1].append(coll)
                 elif name:
                     attrs[name] = (tag, [coll])
                     last = name
                 elif last is not None:
                     attrs[last][1].append(coll)
+                else:
+                    raise ValueError("additional value without an attribute")
                 stack.append([coll, None])
             elif tag == END_COLLECTION:
+                if not stack:
+                    raise ValueError("end of collection without a collection")
                 stack.pop()
             elif tag == MEMBER:
-                member = raw.decode("utf-8", "replace")
-                stack[-1][1] = member
+                if not stack:
+                    raise ValueError("member name outside a collection")
+                stack[-1][1] = raw.decode("utf-8", "replace")
             elif stack:
                 coll, member = stack[-1]
+                if member is None:
+                    raise ValueError("collection value without a member name")
                 coll.setdefault(member, (tag, []))[1].append(decode_value(tag, raw))
             else:
                 if name:
@@ -78,6 +92,8 @@ class Request:
                     last = name
                 elif last is not None:
                     attrs[last][1].append(decode_value(tag, raw))
+                else:
+                    raise ValueError("additional value without an attribute")
         raise ValueError("missing end-of-attributes tag")
 
     def group(self, tag):
@@ -99,6 +115,16 @@ class Request:
             if name in attrs:
                 return attrs[name][1]
         return []
+
+
+def _field(data, i):
+    """2-byte length + bytes -> (bytes, next index)"""
+    if i + 2 > len(data):
+        raise ValueError("truncated IPP message")
+    (n,) = struct.unpack(">H", data[i:i + 2])
+    if i + 2 + n > len(data):
+        raise ValueError("truncated IPP message")
+    return data[i + 2:i + 2 + n], i + 2 + n
 
 
 def decode_value(tag, raw):
